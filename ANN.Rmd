@@ -9,3 +9,332 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r}
+install.packages("AppliedPredictiveModeling")
+install.packages("brulee")
+install.packages("reportRmd")
+install.packages("neuralnet")
+```
+
+# Loading the Libraries
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(sjPlot)
+library(finalfit)
+library(knitr)
+library(gtsummary)
+library(mlbench)
+library(vip)
+library(microbenchmark)
+library(AppliedPredictiveModeling)
+library(brulee)
+library(reportRmd)
+library(neuralnet)
+```
+
+# Install and Load Torch
+
+```{r torch-setup}
+if (!torch::torch_is_installed()) {
+  torch::install_torch()
+}
+library(torch)
+```
+
+# Research Objectives
+Using the artifical neural network to predict stroke diagnosis
+
+# Exploratory data analysis
+
+## Reading in data and formatting 
+
+Here are reading in data and getting organized to run our models. 
+
+```{r}
+data <- read_csv("canpath_imputed.csv")
+
+data <- data %>% mutate_at(3, factor)
+data <- data %>% mutate_at(5:6, factor)
+data <- data %>% mutate_at(8:9, factor)
+data <- data %>% mutate_at(12:12, factor)
+data <- data %>% mutate_at(15:81, factor)
+data <- data %>% mutate_at(83:93, factor)
+
+table(data$DIS_DIAB_EVER)
+
+data <- data %>%
+  mutate(
+    stroke = case_when(
+      DIS_STROKE_EVER == 0 ~ 0,
+      DIS_STROKE_EVER == 1 ~ 1,
+      DIS_STROKE_EVER == 2 ~ 0
+    ),
+    diabetes = case_when(
+      DIS_DIAB_EVER == 0 ~ 0,
+      DIS_DIAB_EVER == 1 ~ 1,
+      DIS_DIAB_EVER == 2 ~ 0
+    ),
+    hypertension = case_when(
+      DIS_HBP_EVER == 0 ~ 0,
+      DIS_HBP_EVER == 1 ~ 1,
+      DIS_HBP_EVER == 2 ~ 0
+    ),
+    depression = case_when(
+      DIS_DEP_EVER == 0 ~ 0,
+      DIS_DEP_EVER == 1 ~ 1,
+      DIS_DEP_EVER == 2 ~ 0
+    )
+  ) %>%
+  mutate(
+    stroke = as.factor(stroke),
+    diabetes = as.factor(diabetes),
+    hypertension = as.factor(hypertension),
+    depression = as.factor(depression)
+  )
+
+
+table(data$DIS_STROKE_EVER, data$stroke)
+
+data$DIS_STROKE_EVER <- NULL
+```
+
+```{r}
+data_continuous <- select(data, stroke, 
+                            PSE_ADULT_WRK_DURATION, 
+                            PM_BMI_SR, 
+                            PA_TOTAL_SHORT, 
+                            SDC_HOUSEHOLD_CHILDREN_NB, 
+                            SDC_HOUSEHOLD_ADULTS_NB, 
+                            SDC_EDU_LEVEL_AGE, 
+                            SDC_AGE_CALC, 
+                            SDC_GENDER,
+                          hypertension,
+                          diabetes,
+                          depression)
+```
+
+```{r}
+
+```
+
+## Descriptives
+```{r}
+summary(data_continuous)
+```
+## Checking missing values
+```{r}
+sum(is.na(data_continuous))
+```
+ No missing value is found.
+ 
+# Artifical Neural Network
+
+## Creating training and testing data
+
+```{r}
+set.seed(10)
+
+#### Cross Validation Split
+cv_split <- initial_validation_split(data_continuous, 
+                            strata = stroke, 
+                            prop = c(0.70, 0.20))
+
+# Create data frames for the two sets:
+train_data <- training(cv_split)
+table(train_data$stroke)
+
+test_data  <- testing(cv_split)
+table(test_data$stroke)
+```
+## V-folds
+
+```{r}
+folds <- vfold_cv(training(cv_split), v = 3, strata = stroke)
+```
+
+## Creating the Recipe
+
+```{r}
+stroke_recipe <- 
+  recipe(stroke ~ ., data = train_data) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors(), -all_outcomes()) %>%
+  step_normalize(all_numeric_predictors())
+```
+
+## Basic Model
+```{r}
+# Converting variables into numeric
+train_data$hypertension <- as.numeric(as.character(train_data$hypertension))
+train_data$diabetes     <- as.numeric(as.character(train_data$diabetes))
+train_data$depression   <- as.numeric(as.character(train_data$depression))
+
+# Running the model
+basic_ann <- neuralnet(stroke ~ PSE_ADULT_WRK_DURATION + 
+                            PM_BMI_SR + 
+                            PA_TOTAL_SHORT +
+                            SDC_HOUSEHOLD_CHILDREN_NB + 
+                            SDC_HOUSEHOLD_ADULTS_NB + 
+                            SDC_EDU_LEVEL_AGE+
+                       hypertension+
+                         diabetes+
+                         depression,
+                data = train_data,
+                hidden = c(3, 1),
+                linear.output = FALSE
+                )
+
+plot(basic_ann, rep = "best")
+```
+
+## TidyModels ANN
+
+```{r}
+set.seed(123)
+
+mlp_model <- mlp(epochs = tune(), 
+                 hidden_units = tune(), 
+                 penalty = tune(), 
+                 learn_rate = tune(), 
+                 activation = tune()) %>% 
+                  set_engine("brulee", validation = 0) %>% 
+                  set_mode("classification")
+```
+
+### Workflow
+
+```{r}
+mlp_workflow <- 
+  workflow() %>% 
+  add_model(mlp_model) %>% 
+  add_recipe(stroke_recipe) %>% 
+    tune_grid(resamples = folds,
+                control = control_grid(save_pred = TRUE, 
+                verbose = TRUE)) 
+```
+
+### Workflow results
+
+```{r}
+metrics_tune <- collect_metrics(mlp_workflow)
+
+show_best(mlp_workflow, metric='accuracy', n=5)  
+
+plot(autoplot(mlp_workflow, metric = 'accuracy'))
+```
+
+### Final model - Test data
+
+```{r}
+mlp_best <- 
+  mlp_workflow %>% 
+  select_best(metric = "accuracy")
+
+mlp_final_model <- finalize_model(
+                          mlp_model,
+                          mlp_best
+                          )
+mlp_final_model
+
+
+final_mlp_workflow <- workflow() %>%
+                      add_recipe(stroke_recipe) %>%
+                      add_model(mlp_final_model)
+
+final_mlp_results <- final_mlp_workflow %>%
+                    last_fit(cv_split)
+
+mlp_results <- final_mlp_results %>% collect_metrics()
+```
+
+## Final Results
+
+```{r}
+kable(mlp_results)
+```
+`The accuracy of this model is 98.76%, and the ROC-AUC of this single layer ANN is 67.10%.
+
+## Two Layer ANN
+
+```{r}
+set.seed(123)
+
+mlp_model_2l <- mlp(epochs = tune(), 
+                    hidden_units = tune(), 
+                    penalty = tune(), 
+                    learn_rate = tune(), 
+                    activation = tune()) %>% 
+                 set_engine("brulee_two_layer",
+                   hidden_units_2 = tune(),
+                   activation_2 = tune()) %>% 
+                 set_mode("classification")
+```
+
+### Workflow
+
+```{r}
+### Takes around 5minutes to run
+
+mlp_workflow_2l <- 
+  workflow() %>% 
+  add_model(mlp_model_2l) %>% 
+  add_recipe(stroke_recipe) %>% 
+    tune_grid(resamples = folds,
+                control = control_grid(save_pred = TRUE, 
+                verbose = TRUE)) 
+```
+
+### Workflow results
+
+```{r}
+metrics_tune_2l <- collect_metrics(mlp_workflow_2l)
+
+show_best(mlp_workflow_2l, metric='accuracy', n=5)  # only show the results for the best 5 models
+```
+
+### Final model - Test data
+
+```{r}
+mlp_best_2l <- 
+  mlp_workflow_2l %>% 
+  select_best(metric = "accuracy")
+
+mlp_final_model_2l <- finalize_model(
+                          mlp_model_2l,
+                          mlp_best_2l
+                          )
+mlp_final_model_2l
+
+
+final_mlp_workflow_2l <- workflow() %>%
+                      add_recipe(stroke_recipe) %>%
+                      add_model(mlp_final_model_2l)
+
+final_mlp_results_2l <- final_mlp_workflow_2l %>%
+                        last_fit(cv_split)
+
+mlp_results_2l <- final_mlp_results_2l %>% collect_metrics()
+```
+
+## Final Results
+
+```{r}
+kable(mlp_results_2l)
+```
+
+## Final Results
+
+```{r single-layer-table}
+kable(mlp_results)
+```
+
+# Model Comparison and reasoning
+The accuracy of two layer ANN is 98.76 and ROC is 61.78. In comparison to the single layer ANN, the accuracy of the two models are same but the ROC-AUC is less for the two layer model. Two layer ANN performed worse than than the single layer ANN. The reason behind this can be
+1. Class imbalance
+2. Overfitting in the complex model
+3. Low sample size
+
+## Variable Importance
+ Feature importance is not available for the ANN as the weights assigned in ANN does not reflect importance,secondly, the inputs are transformed multiple times and scaling changes the weight magnitude completely. However, I believe that there are some indirect ways to get variable importance in ANN, which I need to explore further, but I am not sure.
+
