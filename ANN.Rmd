@@ -9,13 +9,6 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
-install.packages("AppliedPredictiveModeling")
-install.packages("brulee")
-install.packages("reportRmd")
-install.packages("neuralnet")
-```
-
 # Loading the Libraries
 ```{r}
 library(tidyverse)
