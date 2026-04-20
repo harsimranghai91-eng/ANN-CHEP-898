@@ -322,7 +322,7 @@ kable(mlp_results_2l)
 kable(mlp_results)
 ```
 
-# Model Comparison and reasoning
+# Model Comparison and Reasoning
 The accuracy of two layer ANN is 98.76 and ROC is 61.78. In comparison to the single layer ANN, the accuracy of the two models are same but the ROC-AUC is less for the two layer model. Two layer ANN performed worse than than the single layer ANN. The reason behind this can be
 1. Class imbalance
 2. Overfitting in the complex model
